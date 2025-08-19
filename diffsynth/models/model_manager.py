@@ -82,10 +82,36 @@ def load_model_from_single_file(state_dict, model_names, model_classes, model_re
 def load_model_from_huggingface_folder(file_path, model_names, model_classes, torch_dtype, device):
     loaded_model_names, loaded_models = [], []
     for model_name, model_class in zip(model_names, model_classes):
-        if torch_dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            model = model_class.from_pretrained(file_path, torch_dtype=torch_dtype).eval()
+        # 检查模型类是否有from_pretrained方法
+        if hasattr(model_class, "from_pretrained"):
+            if torch_dtype in [torch.float32, torch.float16, torch.bfloat16]:
+                model = model_class.from_pretrained(file_path, torch_dtype=torch_dtype).eval()
+            else:
+                model = model_class.from_pretrained(file_path).eval().to(dtype=torch_dtype)
         else:
-            model = model_class.from_pretrained(file_path).eval().to(dtype=torch_dtype)
+            # 对于没有from_pretrained方法的模型，如QwenImageDiT，使用传统的实例化方式
+            # 1. 加载config.json获取模型配置
+            config_path = os.path.join(file_path, "config.json")
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            
+            # 2. 实例化模型
+            with init_weights_on_device():
+                model = model_class()
+            
+            # 3. 加载状态字典
+            state_dict = load_state_dict(os.path.join(file_path, "diffusion_pytorch_model.bin"))
+            
+            # 4. 如果模型有state_dict_converter方法，使用它来转换状态字典
+            if hasattr(model_class, "state_dict_converter"):
+                converter = model_class.state_dict_converter()
+                if hasattr(converter, "from_diffusers"):
+                    state_dict = converter.from_diffusers(state_dict)
+            
+            # 5. 应用状态字典并设置模型参数类型
+            model.load_state_dict(state_dict, strict=False)
+            model = model.eval().to(dtype=torch_dtype)
+        
         if torch_dtype == torch.float16 and hasattr(model, "half"):
             model = model.half()
         try:
