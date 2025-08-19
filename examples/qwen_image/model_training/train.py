@@ -60,6 +60,35 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
 
     
     def forward_preprocess(self, data):
+        # 检查是否为批处理数据
+        is_batch = isinstance(data["image"], list)
+        
+        if is_batch:
+            # 批处理模式：处理多个样本
+            batch_size = len(data["image"])
+            batch_losses = []
+            
+            for i in range(batch_size):
+                # 为每个样本创建单独的数据字典
+                single_data = {}
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        single_data[key] = value[i]
+                    else:
+                        single_data[key] = value
+                
+                # 处理单个样本
+                single_inputs = self._process_single_sample(single_data)
+                batch_losses.append(single_inputs)
+            
+            # 返回批处理数据
+            return batch_losses
+        else:
+            # 单样本模式：使用原来的逻辑
+            return self._process_single_sample(data)
+    
+    def _process_single_sample(self, data):
+        """处理单个样本的数据预处理"""
         # CFG-sensitive parameters
         inputs_posi = {"prompt": data["prompt"]}
         inputs_nega = {"negative_prompt": ""}
@@ -100,10 +129,25 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
     
     
     def forward(self, data, inputs=None):
-        if inputs is None: inputs = self.forward_preprocess(data)
-        models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
-        loss = self.pipe.training_loss(**models, **inputs)
-        return loss
+        if inputs is None: 
+            inputs = self.forward_preprocess(data)
+        
+        # 检查是否为批处理数据
+        if isinstance(inputs, list):
+            # 批处理模式：计算所有样本的平均损失
+            batch_losses = []
+            for single_inputs in inputs:
+                models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
+                loss = self.pipe.training_loss(**models, **single_inputs)
+                batch_losses.append(loss)
+            
+            # 返回平均损失
+            return torch.stack(batch_losses).mean()
+        else:
+            # 单样本模式：使用原来的逻辑
+            models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
+            loss = self.pipe.training_loss(**models, **inputs)
+            return loss
 
 
 

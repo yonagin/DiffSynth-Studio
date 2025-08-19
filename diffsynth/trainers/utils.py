@@ -423,12 +423,35 @@ def launch_training_task(
     find_unused_parameters: bool = False,
     batch_size: int = 1,
 ):
+    def custom_collate_fn(batch):
+        """自定义 collate 函数，处理包含 PIL Image 的批次"""
+        if len(batch) == 1:
+            return batch[0]
+        
+        # 对于批处理，我们需要将相同键的数据组合在一起
+        result = {}
+        for key in batch[0].keys():
+            if key == "image":
+                # 对于图像，保持为列表形式，让模型自己处理
+                result[key] = [item[key] for item in batch]
+            elif key == "prompt":
+                # 对于文本，保持为列表形式
+                result[key] = [item[key] for item in batch]
+            else:
+                # 对于其他数据，尝试使用默认的 collate 方式
+                try:
+                    result[key] = torch.utils.data.dataloader.default_collate([item[key] for item in batch])
+                except:
+                    # 如果默认 collate 失败，保持为列表形式
+                    result[key] = [item[key] for item in batch]
+        return result
+    
     if batch_size == 1:
         # 使用原来的单样本处理方式
         dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     else:
-        # 使用批处理方式
-        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers)
+        # 使用批处理方式，使用自定义的 collate 函数
+        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, collate_fn=custom_collate_fn, num_workers=num_workers)
     
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
