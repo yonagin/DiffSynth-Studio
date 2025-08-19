@@ -183,4 +183,5 @@ if __name__ == "__main__":
         find_unused_parameters=args.find_unused_parameters,
         num_workers=args.dataset_num_workers,
         batch_size=args.batch_size,
+        log_loss_interval=args.log_loss_interval,
     )

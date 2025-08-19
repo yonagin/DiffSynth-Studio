@@ -422,6 +422,7 @@ def launch_training_task(
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
     batch_size: int = 1,
+    log_loss_interval: int = 10,
 ):
     def custom_collate_fn(batch):
         """自定义 collate 函数，处理包含 PIL Image 的批次"""
@@ -459,8 +460,17 @@ def launch_training_task(
     )
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
+    # 添加loss统计变量
+    total_loss = 0.0
+    num_steps = 0
+    
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+        # 使用tqdm创建进度条，并添加loss显示
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}")
+        epoch_loss = 0.0
+        epoch_steps = 0
+        
+        for data in progress_bar:
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 loss = model(data)
@@ -468,8 +478,26 @@ def launch_training_task(
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
+                
+                # 更新loss统计
+                if accelerator.is_main_process:
+                    loss_value = loss.detach().float().item()
+                    total_loss += loss_value
+                    epoch_loss += loss_value
+                    num_steps += 1
+                    epoch_steps += 1
+                    
+                    # 更新进度条显示
+                    avg_loss = epoch_loss / epoch_steps
+                    progress_bar.set_postfix({
+                        'loss': f'{loss_value:.4f}',
+                        'avg_loss': f'{avg_loss:.4f}',
+                        'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+                    })
+        
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+    
     model_logger.on_training_end(accelerator, model, save_steps)
 
 
@@ -517,6 +545,7 @@ def wan_parser():
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
+    parser.add_argument("--log_loss_interval", type=int, default=10, help="Interval for logging loss information (steps). Set to 0 to disable loss logging.")
     return parser
 
 
@@ -551,6 +580,7 @@ def flux_parser():
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
+    parser.add_argument("--log_loss_interval", type=int, default=10, help="Interval for logging loss information (steps). Set to 0 to disable loss logging.")
     return parser
 
 
@@ -585,4 +615,5 @@ def qwen_image_parser():
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
+    parser.add_argument("--log_loss_interval", type=int, default=10, help="Interval for logging loss information (steps). Set to 0 to disable loss logging.")
     return parser
