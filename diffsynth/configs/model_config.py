@@ -186,8 +186,6 @@ huggingface_model_loader_configs = [
     ("LlavaForConditionalGeneration", "diffsynth.models.hunyuan_video_text_encoder", "hunyuan_video_text_encoder_2", "HunyuanVideoMLLMEncoder"),
     ("Step1Model", "diffsynth.models.stepvideo_text_encoder", "stepvideo_text_encoder_2", "STEP1TextEncoder"),
     ("Qwen2_5_VLForConditionalGeneration", "diffsynth.models.qwenvl", "qwenvl", "Qwen25VL_7b_Embedder"),
-    # 添加QwenImageTransformer2DModel的映射，解决KeyError问题
-    ("QwenImageTransformer2DModel", "diffsynth.models.qwen_image_dit", "qwen_image_dit", "QwenImageDiT"),
 ]
 patch_model_loader_configs = [
     # These configs are provided for detecting model type automatically.
