@@ -421,8 +421,15 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
+    batch_size: int = 1,
 ):
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    if batch_size == 1:
+        # 使用原来的单样本处理方式
+        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    else:
+        # 使用批处理方式
+        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers)
+    
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
@@ -486,6 +493,7 @@ def wan_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
     return parser
 
 
@@ -519,6 +527,7 @@ def flux_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
     return parser
 
 
@@ -552,4 +561,5 @@ def qwen_image_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader.")
     return parser
