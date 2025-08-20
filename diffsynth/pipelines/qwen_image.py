@@ -85,6 +85,7 @@ class QwenImagePipeline(BasePipeline):
     def clear_lora(self):
         for name, module in self.named_modules():
             if isinstance(module, AutoWrappedLinear): 
+                print("clear lora in module:", name)
                 if hasattr(module, "lora_A_weights"):
                     module.lora_A_weights.clear()
                 if hasattr(module, "lora_B_weights"):
