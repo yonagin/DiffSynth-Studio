@@ -80,8 +80,17 @@ class QwenImagePipeline(BasePipeline):
         loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
         lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
-    
-    
+
+
+    def clear_lora(self):
+        for name, module in self.named_modules():
+            if isinstance(module, AutoWrappedLinear): 
+                if hasattr(module, "lora_A_weights"):
+                    module.lora_A_weights.clear()
+                if hasattr(module, "lora_B_weights"):
+                    module.lora_B_weights.clear()
+
+
     def training_loss(self, **inputs):
         timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (1,))
         timestep = self.scheduler.timesteps[timestep_id].to(dtype=self.torch_dtype, device=self.device)
@@ -101,31 +110,119 @@ class QwenImagePipeline(BasePipeline):
         if vram_limit is None:
             vram_limit = self.get_vram()
         vram_limit = vram_limit - vram_buffer
-
-    def clear_lora(self):       
-        cleared_count = 0
         
-        # 遍历所有模型组件
-        for model_name in ['text_encoder', 'dit', 'vae', 'blockwise_controlnet']:
-            model = getattr(self, model_name)
-            if model is None:
-                continue
-            
-            # 递归查找并清除AutoWrappedLinear模块的LoRA权重
-            def clear_lora_in_module(module):
-                nonlocal cleared_count
-                for name, submodule in module.named_children():
-                    if isinstance(submodule, AutoWrappedLinear):
-                        # 清除LoRA权重
-                        submodule.lora_A_weights = []
-                        submodule.lora_B_weights = []
-                        cleared_count += 1
-                    clear_lora_in_module(submodule)
-            
-            clear_lora_in_module(model)
-            
-        print(f"已清除{cleared_count}个AutoWrappedLinear模块的LoRA权重")
-        
+        if self.text_encoder is not None:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding, Qwen2RMSNorm
+            dtype = next(iter(self.text_encoder.parameters())).dtype
+            enable_vram_management(
+                self.text_encoder,
+                module_map = {
+                    torch.nn.Linear: AutoWrappedLinear,
+                    torch.nn.Embedding: AutoWrappedModule,
+                    Qwen2_5_VLRotaryEmbedding: AutoWrappedModule,
+                    Qwen2RMSNorm: AutoWrappedModule,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device="cpu",
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
+        if self.dit is not None:
+            from ..models.qwen_image_dit import RMSNorm
+            dtype = next(iter(self.dit.parameters())).dtype
+            device = "cpu" if vram_limit is not None else self.device
+            if not enable_dit_fp8_computation:
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        RMSNorm: AutoWrappedModule,
+                        torch.nn.Linear: AutoWrappedLinear,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=self.torch_dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+            else:
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        RMSNorm: AutoWrappedModule,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=self.torch_dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        torch.nn.Linear: AutoWrappedLinear,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+        if self.vae is not None:
+            from ..models.qwen_image_vae import QwenImageRMS_norm
+            dtype = next(iter(self.vae.parameters())).dtype
+            enable_vram_management(
+                self.vae,
+                module_map = {
+                    torch.nn.Linear: AutoWrappedLinear,
+                    torch.nn.Conv3d: AutoWrappedModule,
+                    torch.nn.Conv2d: AutoWrappedModule,
+                    QwenImageRMS_norm: AutoWrappedModule,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device="cpu",
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
+        if self.blockwise_controlnet is not None:
+            enable_vram_management(
+                self.blockwise_controlnet,
+                module_map = {
+                    RMSNorm: AutoWrappedModule,
+                    torch.nn.Linear: AutoWrappedLinear,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device=device,
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
+    
     
     @staticmethod
     def from_pretrained(
@@ -335,253 +432,4 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
             prompt = [prompt]
             # If edit_image is None, use the default template for Qwen-Image, otherwise use the template for Qwen-Image-Edit
             if edit_image is None:
-                template = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-                drop_idx = 34
-            else:
-                template =  "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
-                drop_idx = 64
-            txt = [template.format(e) for e in prompt]
-
-            # Qwen-Image-Edit model
-            if pipe.processor is not None:
-                model_inputs = pipe.processor(text=txt, images=edit_image, padding=True, return_tensors="pt").to(pipe.device)
-            # Qwen-Image model
-            elif pipe.tokenizer is not None:
-                model_inputs = pipe.tokenizer(txt, max_length=4096+drop_idx, padding=True, truncation=True, return_tensors="pt").to(pipe.device)
-                if model_inputs.input_ids.shape[1] >= 1024:
-                    print(f"Warning!!! QwenImage model was trained on prompts up to 512 tokens. Current prompt requires {model_inputs['input_ids'].shape[1] - drop_idx} tokens, which may lead to unpredictable behavior.")
-            else:
-                assert False, "QwenImagePipeline requires either tokenizer or processor to be loaded."
-
-            if 'pixel_values' in model_inputs:
-                hidden_states = pipe.text_encoder(input_ids=model_inputs.input_ids, attention_mask=model_inputs.attention_mask, pixel_values=model_inputs.pixel_values, image_grid_thw=model_inputs.image_grid_thw, output_hidden_states=True,)[-1]
-            else:
-                hidden_states = pipe.text_encoder(input_ids=model_inputs.input_ids, attention_mask=model_inputs.attention_mask, output_hidden_states=True,)[-1]
-
-            split_hidden_states = self.extract_masked_hidden(hidden_states, model_inputs.attention_mask)
-            split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-            attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
-            max_seq_len = max([e.size(0) for e in split_hidden_states])
-            prompt_embeds = torch.stack([torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states])
-            encoder_attention_mask = torch.stack([torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list])
-            prompt_embeds = prompt_embeds.to(dtype=pipe.torch_dtype, device=pipe.device)
-            return {"prompt_emb": prompt_embeds, "prompt_emb_mask": encoder_attention_mask}
-        else:
-            return {}
-
-
-class QwenImageUnit_EntityControl(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            take_over=True,
-            onload_model_names=("text_encoder",)
-        )
-
-    def extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
-        bool_mask = mask.bool()
-        valid_lengths = bool_mask.sum(dim=1)
-        selected = hidden_states[bool_mask]
-        split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
-        return split_result
-
-    def get_prompt_emb(self, pipe: QwenImagePipeline, prompt) -> dict:
-        if pipe.text_encoder is not None:
-            prompt = [prompt]
-            template = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-            drop_idx = 34
-            txt = [template.format(e) for e in prompt]
-            txt_tokens = pipe.tokenizer(txt, max_length=1024+drop_idx, padding=True, truncation=True, return_tensors="pt").to(pipe.device)
-            hidden_states = pipe.text_encoder(input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True,)[-1]
-            
-            split_hidden_states = self.extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
-            split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-            attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
-            max_seq_len = max([e.size(0) for e in split_hidden_states])
-            prompt_embeds = torch.stack([torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states])
-            encoder_attention_mask = torch.stack([torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list])
-            prompt_embeds = prompt_embeds.to(dtype=pipe.torch_dtype, device=pipe.device)
-            return {"prompt_emb": prompt_embeds, "prompt_emb_mask": encoder_attention_mask}
-        else:
-            return {}
-
-    def preprocess_masks(self, pipe, masks, height, width, dim):
-        out_masks = []
-        for mask in masks:
-            mask = pipe.preprocess_image(mask.resize((width, height), resample=Image.NEAREST)).mean(dim=1, keepdim=True) > 0
-            mask = mask.repeat(1, dim, 1, 1).to(device=pipe.device, dtype=pipe.torch_dtype)
-            out_masks.append(mask)
-        return out_masks
-
-    def prepare_entity_inputs(self, pipe, entity_prompts, entity_masks, width, height):
-        entity_masks = self.preprocess_masks(pipe, entity_masks, height//8, width//8, 1)
-        entity_masks = torch.cat(entity_masks, dim=0).unsqueeze(0) # b, n_mask, c, h, w
-        prompt_embs, prompt_emb_masks = [], []
-        for entity_prompt in entity_prompts:
-            prompt_emb_dict = self.get_prompt_emb(pipe, entity_prompt)
-            prompt_embs.append(prompt_emb_dict['prompt_emb'])
-            prompt_emb_masks.append(prompt_emb_dict['prompt_emb_mask'])
-        return prompt_embs, prompt_emb_masks, entity_masks
-
-    def prepare_eligen(self, pipe, prompt_emb_nega, eligen_entity_prompts, eligen_entity_masks, width, height, enable_eligen_on_negative, cfg_scale):
-        entity_prompt_emb_posi, entity_prompt_emb_posi_mask, entity_masks_posi = self.prepare_entity_inputs(pipe, eligen_entity_prompts, eligen_entity_masks, width, height)
-        if enable_eligen_on_negative and cfg_scale != 1.0:
-            entity_prompt_emb_nega = [prompt_emb_nega['prompt_emb']] * len(entity_prompt_emb_posi)
-            entity_prompt_emb_nega_mask = [prompt_emb_nega['prompt_emb_mask']] * len(entity_prompt_emb_posi)
-            entity_masks_nega = entity_masks_posi
-        else:
-            entity_prompt_emb_nega, entity_prompt_emb_nega_mask, entity_masks_nega = None, None, None
-        eligen_kwargs_posi = {"entity_prompt_emb": entity_prompt_emb_posi, "entity_masks": entity_masks_posi, "entity_prompt_emb_mask": entity_prompt_emb_posi_mask}
-        eligen_kwargs_nega = {"entity_prompt_emb": entity_prompt_emb_nega, "entity_masks": entity_masks_nega, "entity_prompt_emb_mask": entity_prompt_emb_nega_mask}
-        return eligen_kwargs_posi, eligen_kwargs_nega
-
-    def process(self, pipe: QwenImagePipeline, inputs_shared, inputs_posi, inputs_nega):
-        eligen_entity_prompts, eligen_entity_masks = inputs_shared.get("eligen_entity_prompts", None), inputs_shared.get("eligen_entity_masks", None)
-        if eligen_entity_prompts is None or eligen_entity_masks is None or len(eligen_entity_prompts) == 0 or len(eligen_entity_masks) == 0:
-            return inputs_shared, inputs_posi, inputs_nega
-        pipe.load_models_to_device(self.onload_model_names)
-        eligen_enable_on_negative = inputs_shared.get("eligen_enable_on_negative", False)
-        eligen_kwargs_posi, eligen_kwargs_nega = self.prepare_eligen(pipe, inputs_nega,
-            eligen_entity_prompts, eligen_entity_masks, inputs_shared["width"], inputs_shared["height"],
-            eligen_enable_on_negative, inputs_shared["cfg_scale"])
-        inputs_posi.update(eligen_kwargs_posi)
-        if inputs_shared.get("cfg_scale", 1.0) != 1.0:
-            inputs_nega.update(eligen_kwargs_nega)
-        return inputs_shared, inputs_posi, inputs_nega
-
-
-
-class QwenImageUnit_BlockwiseControlNet(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("blockwise_controlnet_inputs", "tiled", "tile_size", "tile_stride"),
-            onload_model_names=("vae",)
-        )
-
-    def apply_controlnet_mask_on_latents(self, pipe, latents, mask):
-        mask = (pipe.preprocess_image(mask) + 1) / 2
-        mask = mask.mean(dim=1, keepdim=True)
-        mask = 1 - torch.nn.functional.interpolate(mask, size=latents.shape[-2:])
-        latents = torch.concat([latents, mask], dim=1)
-        return latents
-
-    def apply_controlnet_mask_on_image(self, pipe, image, mask):
-        mask = mask.resize(image.size)
-        mask = pipe.preprocess_image(mask).mean(dim=[0, 1]).cpu()
-        image = np.array(image)
-        image[mask > 0] = 0
-        image = Image.fromarray(image)
-        return image
-
-    def process(self, pipe: QwenImagePipeline, blockwise_controlnet_inputs: list[ControlNetInput], tiled, tile_size, tile_stride):
-        if blockwise_controlnet_inputs is None:
-            return {}
-        pipe.load_models_to_device(self.onload_model_names)
-        conditionings = []
-        for controlnet_input in blockwise_controlnet_inputs:
-            image = controlnet_input.image
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
-
-            image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
-            image = pipe.vae.encode(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
-            conditionings.append(image)
-            
-        return {"blockwise_controlnet_conditioning": conditionings}
-
-
-class QwenImageUnit_EditImageEmbedder(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("edit_image", "height", "width", "tiled", "tile_size", "tile_stride"),
-            onload_model_names=("vae",)
-        )
-
-    def process(self, pipe: QwenImagePipeline, edit_image, height, width, tiled, tile_size, tile_stride):
-        if edit_image is None:
-            return {}
-        pipe.load_models_to_device(['vae'])
-        edit_image = pipe.preprocess_image(edit_image).to(device=pipe.device, dtype=pipe.torch_dtype)
-        edit_latents = pipe.vae.encode(edit_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        return {"edit_latents": edit_latents}
-
-
-def model_fn_qwen_image(
-    dit: QwenImageDiT = None,
-    blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None,
-    latents=None,
-    timestep=None,
-    prompt_emb=None,
-    prompt_emb_mask=None,
-    height=None,
-    width=None,
-    blockwise_controlnet_conditioning=None,
-    blockwise_controlnet_inputs=None,
-    progress_id=0,
-    num_inference_steps=1,
-    entity_prompt_emb=None,
-    entity_prompt_emb_mask=None,
-    entity_masks=None,
-    edit_latents=None,
-    enable_fp8_attention=False,
-    use_gradient_checkpointing=False,
-    use_gradient_checkpointing_offload=False,
-    **kwargs
-):
-    img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
-    txt_seq_lens = prompt_emb_mask.sum(dim=1).tolist()
-    timestep = timestep / 1000
-    
-    image = rearrange(latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=height//16, W=width//16, P=2, Q=2)
-    image_seq_len = image.shape[1]
-
-    if edit_latents is not None:
-        img_shapes += [(edit_latents.shape[0], edit_latents.shape[2]//2, edit_latents.shape[3]//2)]
-        edit_image = rearrange(edit_latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=edit_latents.shape[2]//2, W=edit_latents.shape[3]//2, P=2, Q=2)
-        image = torch.cat([image, edit_image], dim=1)
-
-    image = dit.img_in(image)
-    conditioning = dit.time_text_embed(timestep, image.dtype)
-
-    if entity_prompt_emb is not None:
-        text, image_rotary_emb, attention_mask = dit.process_entity_masks(
-            latents, prompt_emb, prompt_emb_mask, entity_prompt_emb, entity_prompt_emb_mask,
-            entity_masks, height, width, image, img_shapes,
-        )
-    else:
-        text = dit.txt_in(dit.txt_norm(prompt_emb))
-        image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
-        attention_mask = None
-        
-    if blockwise_controlnet_conditioning is not None:
-        blockwise_controlnet_conditioning = blockwise_controlnet.preprocess(
-            blockwise_controlnet_inputs, blockwise_controlnet_conditioning)
-
-    for block_id, block in enumerate(dit.transformer_blocks):
-        text, image = gradient_checkpoint_forward(
-            block,
-            use_gradient_checkpointing,
-            use_gradient_checkpointing_offload,
-            image=image,
-            text=text,
-            temb=conditioning,
-            image_rotary_emb=image_rotary_emb,
-            attention_mask=attention_mask,
-            enable_fp8_attention=enable_fp8_attention,
-        )
-        if blockwise_controlnet_conditioning is not None:
-            image[:, :image_seq_len] = image[:, :image_seq_len] + blockwise_controlnet.blockwise_forward(
-                image=image[:, :image_seq_len], conditionings=blockwise_controlnet_conditioning,
-                controlnet_inputs=blockwise_controlnet_inputs, block_id=block_id,
-                progress_id=progress_id, num_inference_steps=num_inference_steps,
-            )
-    
-    image = dit.norm_out(image, conditioning)
-    image = dit.proj_out(image)
-    if edit_latents is not None:
-        image = image[:, :image_seq_len]
-    
-    latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
-    return latents
+                template = "
