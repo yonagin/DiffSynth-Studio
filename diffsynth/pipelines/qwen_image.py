@@ -81,15 +81,6 @@ class QwenImagePipeline(BasePipeline):
         lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
 
-
-    def clear_lora(self):
-        for name, module in self.named_modules():
-            if isinstance(module, AutoWrappedLinear): 
-                print("clear lora in module:", name)
-                if hasattr(module, "lora_A_weights"):
-                    module.lora_A_weights.clear()
-                if hasattr(module, "lora_B_weights"):
-                    module.lora_B_weights.clear()
     
     def training_loss(self, **inputs):
         timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (1,))
