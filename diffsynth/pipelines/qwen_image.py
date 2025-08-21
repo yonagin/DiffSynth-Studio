@@ -80,8 +80,37 @@ class QwenImagePipeline(BasePipeline):
         loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
         lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
-
     
+    
+    def clear_lora(self):
+        for name, module in self.named_modules():
+            if isinstance(module, AutoWrappedLinear): 
+                if hasattr(module, "lora_A_weights"):
+                    module.lora_A_weights.clear()
+                if hasattr(module, "lora_B_weights"):
+                    module.lora_B_weights.clear()
+                    
+    
+    def enable_lora_magic(self):
+        if self.dit is not None:
+            if not (hasattr(self.dit, "vram_management_enabled") and self.dit.vram_management_enabled):
+                dtype = next(iter(self.dit.parameters())).dtype
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        torch.nn.Linear: AutoWrappedLinear,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device=self.device,
+                        onload_dtype=dtype,
+                        onload_device=self.device,
+                        computation_dtype=self.torch_dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=None,
+                )
+
     def training_loss(self, **inputs):
         timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (1,))
         timestep = self.scheduler.timesteps[timestep_id].to(dtype=self.torch_dtype, device=self.device)
@@ -101,7 +130,118 @@ class QwenImagePipeline(BasePipeline):
         if vram_limit is None:
             vram_limit = self.get_vram()
         vram_limit = vram_limit - vram_buffer
-
+        
+        if self.text_encoder is not None:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding, Qwen2RMSNorm
+            dtype = next(iter(self.text_encoder.parameters())).dtype
+            enable_vram_management(
+                self.text_encoder,
+                module_map = {
+                    torch.nn.Linear: AutoWrappedLinear,
+                    torch.nn.Embedding: AutoWrappedModule,
+                    Qwen2_5_VLRotaryEmbedding: AutoWrappedModule,
+                    Qwen2RMSNorm: AutoWrappedModule,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device="cpu",
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
+        if self.dit is not None:
+            from ..models.qwen_image_dit import RMSNorm
+            dtype = next(iter(self.dit.parameters())).dtype
+            device = "cpu" if vram_limit is not None else self.device
+            if not enable_dit_fp8_computation:
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        RMSNorm: AutoWrappedModule,
+                        torch.nn.Linear: AutoWrappedLinear,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=self.torch_dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+            else:
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        RMSNorm: AutoWrappedModule,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=self.torch_dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+                enable_vram_management(
+                    self.dit,
+                    module_map = {
+                        torch.nn.Linear: AutoWrappedLinear,
+                    },
+                    module_config = dict(
+                        offload_dtype=dtype,
+                        offload_device="cpu",
+                        onload_dtype=dtype,
+                        onload_device=device,
+                        computation_dtype=dtype,
+                        computation_device=self.device,
+                    ),
+                    vram_limit=vram_limit,
+                )
+        if self.vae is not None:
+            from ..models.qwen_image_vae import QwenImageRMS_norm
+            dtype = next(iter(self.vae.parameters())).dtype
+            enable_vram_management(
+                self.vae,
+                module_map = {
+                    torch.nn.Linear: AutoWrappedLinear,
+                    torch.nn.Conv3d: AutoWrappedModule,
+                    torch.nn.Conv2d: AutoWrappedModule,
+                    QwenImageRMS_norm: AutoWrappedModule,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device="cpu",
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
+        if self.blockwise_controlnet is not None:
+            enable_vram_management(
+                self.blockwise_controlnet,
+                module_map = {
+                    RMSNorm: AutoWrappedModule,
+                    torch.nn.Linear: AutoWrappedLinear,
+                },
+                module_config = dict(
+                    offload_dtype=dtype,
+                    offload_device="cpu",
+                    onload_dtype=dtype,
+                    onload_device=device,
+                    computation_dtype=self.torch_dtype,
+                    computation_device=self.device,
+                ),
+                vram_limit=vram_limit,
+            )
     
     
     @staticmethod
